@@ -3,6 +3,7 @@
 Makefile
 bin/*
 build/*
+.cache/
 .devcontainer/build
 doxygen-log.txt
 html/*
