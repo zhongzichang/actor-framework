@@ -10,11 +10,14 @@
 #include "caf/net/receive_policy.hpp"
 #include "caf/net/socket_manager.hpp"
 
+#include "caf/action.hpp"
 #include "caf/byte_span.hpp"
 #include "caf/defaults.hpp"
 #include "caf/detail/format.hpp"
+#include "caf/disposable.hpp"
 #include "caf/error.hpp"
 #include "caf/log/net.hpp"
+#include "caf/string_algorithms.hpp"
 
 #include <algorithm>
 
@@ -39,6 +42,11 @@ public:
     // nop
   }
 
+  ~server_impl() override {
+    if (timeout_task_)
+      timeout_task_.dispose();
+  }
+
   // -- properties -------------------------------------------------------------
 
   size_t max_request_size() const noexcept override {
@@ -48,6 +56,20 @@ public:
   void max_request_size(size_t value) noexcept override {
     if (value > 0)
       max_request_size_ = value;
+  }
+
+  timespan timeout() const noexcept override {
+    return timeout_;
+  }
+
+  void timeout(timespan value) noexcept override {
+    timeout_ = value;
+    if (timeout_task_) {
+      timeout_task_.dispose();
+      timeout_task_ = disposable{};
+    }
+    if (down_ && timeout_ != infinite)
+      schedule_timeout_check();
   }
 
   // -- http::lower_layer implementation ---------------------------------------
@@ -82,15 +104,23 @@ public:
   }
 
   void begin_header(status code) override {
+    connection_header_sent_ = false;
     down_->begin_output();
     v1::begin_response_header(code, down_->output_buffer());
   }
 
   void add_header_field(std::string_view key, std::string_view val) override {
+    if (icase_equal(key, "Connection")) {
+      connection_header_sent_ = true;
+      if (icase_equal(val, "close"))
+        connection_close_ = true;
+    }
     v1::add_header_field(key, val, down_->output_buffer());
   }
 
   bool end_header() override {
+    if (connection_close_ && !connection_header_sent_)
+      v1::add_header_field("Connection", "close", down_->output_buffer());
     return v1::end_header(down_->output_buffer()) && down_->end_output();
   }
 
@@ -99,6 +129,8 @@ public:
     auto& buf = down_->output_buffer();
     buf.insert(buf.end(), bytes.begin(), bytes.end());
     down_->end_output();
+    if (connection_close_)
+      down_->shutdown();
     return true;
   }
 
@@ -120,7 +152,10 @@ public:
     down_->begin_output();
     auto& buf = down_->output_buffer();
     buf.insert(buf.end(), bytes.begin(), bytes.end());
-    return down_->end_output();
+    down_->end_output();
+    if (connection_close_)
+      down_->shutdown();
+    return true;
   }
 
   void
@@ -132,6 +167,9 @@ public:
 
   error start(octet_stream::lower_layer* down) override {
     down_ = down;
+    last_activity_ = down_->manager()->steady_time();
+    if (timeout_ != infinite)
+      schedule_timeout_check();
     return up_->start(this);
   }
 
@@ -159,7 +197,12 @@ public:
     return up_->done_sending();
   }
 
+  void written(size_t) override {
+    last_activity_ = down_->manager()->steady_time();
+  }
+
   ptrdiff_t consume(byte_span input, byte_span) override {
+    last_activity_ = down_->manager()->steady_time();
     auto lg = log::net::trace("bytes = {}", input.size());
     ptrdiff_t consumed = 0;
     for (;;) {
@@ -317,12 +360,30 @@ private:
       write_response(code, msg);
       abort(sec::protocol_error, "received malformed header");
       return false;
+    }
+    if (hdr_.field_equals(ignore_case, "Connection", "close")) {
+      connection_close_ = true;
+    } else if (hdr_.field_equals(ignore_case, "Connection", "keep-alive")) {
+      connection_close_ = false;
     } else {
-      return true;
+      // HTTP/1.1 assumes keep-alive by default. HTTP/1.0 assumes close.
+      connection_close_ = hdr_.version() == "HTTP/1.0";
+    }
+    return true;
+  }
+
+  void schedule_timeout_check() {
+    auto now = down_->manager()->steady_time();
+    auto delta = now - last_activity_;
+    if (delta >= timeout_) {
+      shutdown();
+    } else {
+      timeout_task_ = down_->manager()->delay_until_fn(
+        last_activity_ + timeout_, [this] { schedule_timeout_check(); });
     }
   }
 
-  octet_stream::lower_layer* down_;
+  octet_stream::lower_layer* down_ = nullptr;
 
   upper_layer_ptr up_;
 
@@ -342,6 +403,16 @@ private:
   size_t received_chunks_size_ = 0;
 
   bool aborted_ = false;
+
+  timespan timeout_ = infinite;
+
+  caf::flow::coordinator::steady_time_point last_activity_;
+
+  disposable timeout_task_;
+
+  bool connection_close_ = false;
+
+  bool connection_header_sent_ = false;
 };
 
 } // namespace

@@ -10,6 +10,7 @@
 #include "caf/net/octet_stream/upper_layer.hpp"
 
 #include "caf/detail/net_export.hpp"
+#include "caf/timespan.hpp"
 
 namespace caf::net::http {
 
@@ -34,6 +35,10 @@ public:
   virtual size_t max_request_size() const noexcept = 0;
 
   virtual void max_request_size(size_t value) noexcept = 0;
+
+  virtual timespan timeout() const noexcept = 0;
+
+  virtual void timeout(timespan value) noexcept = 0;
 };
 
 } // namespace caf::net::http

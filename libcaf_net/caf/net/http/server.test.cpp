@@ -161,6 +161,7 @@ struct fixture {
 
   template <class Callback>
   void run_server_with_max_request_size(Callback cb, size_t max_request_size,
+
                                         async::promise<response_t> res = {}) {
     auto app = app_t::make(std::move(cb), std::move(res));
     auto server = net::http::server::make(std::move(app));
@@ -551,6 +552,30 @@ TEST("GH-2073 Regression - incoming data must be parsed only once") {
   check_eq(res.hdr.path(), "/foo");
   check_eq(res.hdr.content_length(), 21);
   check_eq(res.payload_as_str(), "GET /foo HTTP/1.1\r\n\r\n");
+}
+
+SCENARIO("the server respects Connection: close") {
+  async::promise<response_t> res_promise;
+  auto cb = [](auto* down, const response_t&) {
+    down->send_response(net::http::status::ok, "text/plain", "OK"sv);
+  };
+  run_server(cb, res_promise);
+  auto req = "GET / HTTP/1.1\r\n"
+             "Host: localhost\r\n"
+             "Connection: close\r\n"
+             "\r\n"sv;
+  net::write(fd1, as_bytes(std::span{req}));
+  byte_buffer buf;
+  buf.resize(1024);
+  auto n = net::read(fd1, buf);
+  require(n > 0);
+  // Verify we got a response
+  auto response = to_string_view(buf).substr(0, n);
+  check(response.find("200 OK") != std::string_view::npos);
+  // Connection: close might be added by server if not present, or if connection_close_ is true.
+  // Verify connection is closed.
+  n = net::read(fd1, buf);
+  check_eq(n, 0);
 }
 
 } // WITH_FIXTURE(fixture)
