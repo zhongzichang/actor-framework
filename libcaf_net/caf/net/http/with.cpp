@@ -114,11 +114,13 @@ class http_conn_acceptor : public detail::connection_acceptor {
 public:
   http_conn_acceptor(Acceptor acceptor,
                      std::vector<net::http::route_ptr> routes,
-                     size_t max_consecutive_reads, size_t max_request_size)
+                     size_t max_consecutive_reads, size_t max_request_size,
+                     timespan timeout)
     : acceptor_(std::move(acceptor)),
       routes_(std::move(routes)),
       max_consecutive_reads_(max_consecutive_reads),
-      max_request_size_(max_request_size) {
+      max_request_size_(max_request_size),
+      timeout_(timeout) {
     // nop
   }
 
@@ -148,6 +150,7 @@ public:
     auto app = net::http::router::make(routes_, std::move(guard));
     auto serv = net::http::server::make(std::move(app));
     serv->max_request_size(max_request_size_);
+    serv->timeout(timeout_);
     auto transport = std::unique_ptr<net::octet_stream::transport>{};
     if constexpr (std::is_same_v<std::decay_t<decltype(*conn)>,
                                  net::ssl::connection>)
@@ -175,25 +178,30 @@ private:
   std::vector<net::http::route_ptr> routes_;
   size_t max_consecutive_reads_;
   size_t max_request_size_;
+  timespan timeout_;
   action on_conn_close_;
 };
 
 detail::connection_acceptor_ptr
 make_http_conn_acceptor(net::tcp_accept_socket fd,
                         std::vector<net::http::route_ptr> routes,
-                        size_t max_consecutive_reads, size_t max_request_size) {
+                        size_t max_consecutive_reads, size_t max_request_size,
+                        timespan timeout) {
   using impl_t = http_conn_acceptor<net::tcp_accept_socket>;
   return std::make_unique<impl_t>(std::move(fd), std::move(routes),
-                                  max_consecutive_reads, max_request_size);
+                                  max_consecutive_reads, max_request_size,
+                                  timeout);
 }
 
 detail::connection_acceptor_ptr
 make_http_conn_acceptor(net::ssl::tcp_acceptor acceptor,
                         std::vector<net::http::route_ptr> routes,
-                        size_t max_consecutive_reads, size_t max_request_size) {
+                        size_t max_consecutive_reads, size_t max_request_size,
+                        timespan timeout) {
   using impl_t = http_conn_acceptor<net::ssl::tcp_acceptor>;
   return std::make_unique<impl_t>(std::move(acceptor), std::move(routes),
-                                  max_consecutive_reads, max_request_size);
+                                  max_consecutive_reads, max_request_size,
+                                  timeout);
 }
 
 } // namespace
@@ -232,7 +240,7 @@ public:
       ptr->init();
     auto factory = make_http_conn_acceptor(std::move(acc), routes,
                                            max_consecutive_reads,
-                                           max_request_size);
+                                           max_request_size, timeout);
     auto impl = internal::make_accept_handler(std::move(factory),
                                               max_connections,
                                               monitored_actors);
@@ -317,6 +325,9 @@ public:
   /// Store the maximum size for incoming HTTP requests.
   size_t max_request_size = defaults::net::http_max_request_size;
 
+  /// Store the timeout for idle connections.
+  timespan timeout = infinite;
+
   /// Stores the producer resource for `do_start_server`.
   push_t push;
 
@@ -365,6 +376,11 @@ with_t::server&& with_t::server::reuse_address(bool value) && {
   if (auto* lazy = std::get_if<internal::net_config::server_config::lazy>(
         &config_->server.value))
     lazy->reuse_addr = value;
+  return std::move(*this);
+}
+
+with_t::server&& with_t::server::timeout(timespan value) && {
+  config_->timeout = value;
   return std::move(*this);
 }
 

@@ -53,6 +53,9 @@ public:
     /// Configures whether the server creates its socket with `SO_REUSEADDR`.
     [[nodiscard]] server&& reuse_address(bool value) &&;
 
+    /// Configures the timeout for idle connections.
+    [[nodiscard]] server&& timeout(timespan value) &&;
+
     /// Monitors the actor handle @p hdl and stops the server if the monitored
     /// actor terminates.
     template <class ActorHandle>
